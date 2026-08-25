@@ -224,6 +224,24 @@ Nil means no preamble."
 (defconst lsp-shader-sense--server-id 'shader-sense
   "lsp-mode server-id for the shader-sense client.")
 
+(defconst lsp-shader-sense--section "shader-validator"
+  "Configuration section shader-language-server pulls its settings from.")
+
+(defun lsp-shader-sense--push-configuration (workspace)
+  "Send the current shader-sense settings to WORKSPACE.
+shader-language-server ignores `initializationOptions'; it only picks up
+settings when it pulls them via `workspace/configuration'.  Since 1.4 it
+only pulls on `didChangeConfiguration', so the initial configuration has
+to be pushed explicitly once the workspace is initialized.  Settings are
+read in a workspace buffer so buffer-local values, for example ones from
+`.dir-locals.el', are honored."
+  (lsp-with-current-buffer (or (--first (lsp-buffer-live-p it)
+                                       (lsp--workspace-buffers workspace))
+                               (current-buffer))
+    (with-lsp-workspace workspace
+      (lsp--set-configuration
+       (lsp-configuration-section lsp-shader-sense--section)))))
+
 (defun lsp-shader-sense--register ()
   "Register the shader-sense lsp-mode client."
   (dolist (mode lsp-shader-sense-modes)
@@ -236,12 +254,16 @@ Nil means no preamble."
                        (cons lsp-shader-sense-executable
                              lsp-shader-sense-args)))
     :activation-fn (lsp-activate-on lsp-shader-sense-language-id)
+    :synchronize-sections (list lsp-shader-sense--section)
+    :initialized-fn #'lsp-shader-sense--push-configuration
     :server-id lsp-shader-sense--server-id)))
 
 (defun lsp-shader-sense--unregister ()
   "Remove the shader-sense lsp-mode client."
-  (setq lsp-clients
-        (assq-delete-all lsp-shader-sense--server-id lsp-clients))
+  ;; `lsp-clients' is a hash table keyed by server-id in lsp-mode 9+.
+  (remhash lsp-shader-sense--server-id lsp-clients)
+  (remhash (intern (concat (symbol-name lsp-shader-sense--server-id) "-tramp"))
+           lsp-clients)
   (dolist (mode lsp-shader-sense-modes)
     (setq lsp-language-id-configuration
           (delete (cons mode lsp-shader-sense-language-id)
