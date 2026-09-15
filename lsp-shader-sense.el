@@ -23,6 +23,11 @@
 ;; Activate via `lsp-shader-sense-setup' or the minor mode
 ;; `lsp-shader-sense-mode'.  Project-specific configuration (include paths,
 ;; defines, etc.) is best handled via `.dir-locals.el'.
+;;
+;; If `shader-language-server' is not already on `exec-path', run
+;; `M-x lsp-install-server RET shader-sense RET' to download the latest
+;; release for your platform (Linux and Windows only; other platforms
+;; must build and set `lsp-shader-sense-executable' manually).
 
 ;;; Code:
 
@@ -36,18 +41,94 @@
 
 ;;; Connection
 
-(defcustom lsp-shader-sense-executable
-  (or (executable-find "shader-language-server")
-      (executable-find "shader-language-server.exe")
-      "shader-language-server")
-  "Path to the shader-sense `shader-language-server' executable."
-  :type 'string
+(defcustom lsp-shader-sense-executable nil
+  "Path to the shader-sense `shader-language-server' executable.
+When nil, the executable is located automatically: first via
+`executable-find' on `exec-path', then via `lsp-install-server' if a
+copy was previously downloaded."
+  :type '(choice (const :tag "Auto-detect" nil) file)
   :group 'lsp-shader-sense)
+
+(defun lsp-shader-sense--find-executable ()
+  "Return `lsp-shader-sense-executable', or locate it via `executable-find'."
+  (or lsp-shader-sense-executable
+      (executable-find "shader-language-server")
+      (executable-find "shader-language-server.exe")))
 
 (defcustom lsp-shader-sense-args '("--stdio")
   "Arguments passed to `lsp-shader-sense-executable'."
   :type '(repeat string)
   :group 'lsp-shader-sense)
+
+;;; Installation
+
+(defcustom lsp-shader-sense-version "latest"
+  "Version of shader-language-server to install via `lsp-install-server'.
+Either \"latest\" to always fetch the newest GitHub release, or an
+explicit release tag such as \"v1.5.0\"; see
+https://github.com/antaalt/shader-sense/releases for available tags."
+  :type '(choice (const :tag "Latest" "latest")
+                 string)
+  :group 'lsp-shader-sense)
+
+(defvar lsp-shader-sense--download-url-cache nil
+  "Cached download URL for the shader-language-server release asset.")
+
+(defun lsp-shader-sense--asset-name ()
+  "Return the release asset filename for the current platform."
+  (concat "shader-language-server-"
+          (pcase (list system-type (lsp-resolve-value lsp--system-arch))
+            (`(gnu/linux  x64)   "x86_64-unknown-linux-gnu")
+            (`(windows-nt x64)   "x86_64-pc-windows-msvc")
+            (`(windows-nt arm64) "aarch64-pc-windows-msvc")
+            (_ (user-error
+                "shader-sense does not publish a prebuilt %s/%s server; install `shader-language-server' manually and set `lsp-shader-sense-executable'"
+                system-type (lsp-resolve-value lsp--system-arch))))
+          ".zip"))
+
+(defun lsp-shader-sense--download-url ()
+  "Return the download URL of the shader-language-server release to install.
+When `lsp-shader-sense-version' is \"latest\", queries the GitHub
+releases API for the newest release; otherwise builds the URL for
+that release tag directly, without any network request."
+  (setq lsp-shader-sense--download-url-cache
+        (if (equal lsp-shader-sense-version "latest")
+            (lsp--find-latest-gh-release-url
+             "https://api.github.com/repos/antaalt/shader-sense/releases/latest"
+             (concat (regexp-quote (lsp-shader-sense--asset-name)) "\\'"))
+          (format "https://github.com/antaalt/shader-sense/releases/download/%s/%s"
+                  lsp-shader-sense-version
+                  (lsp-shader-sense--asset-name)))))
+
+(defun lsp-shader-sense--server-dir ()
+  "Directory shader-language-server and its runtime libraries live in."
+  (f-join lsp-server-install-dir "shader-sense"))
+
+(defun lsp-shader-sense--store-path ()
+  "Path the downloaded archive is decompressed from.
+`lsp-download-install' decompresses a `:zip' archive into the parent
+of this path, i.e. `lsp-shader-sense--server-dir'; this path itself is
+only used to derive the `.zip' download location."
+  (f-join (lsp-shader-sense--server-dir) "shader-language-server-archive"))
+
+(defun lsp-shader-sense--binary-path ()
+  "Path to the `shader-language-server' executable once downloaded.
+The archive also contains shared libraries (`libdxcompiler', `libdxil')
+that the server loads at runtime, so the whole archive is extracted
+alongside the executable rather than extracting it alone."
+  (f-join (lsp-shader-sense--server-dir)
+          (if (eq system-type 'windows-nt)
+              "shader-language-server.exe"
+            "shader-language-server")))
+
+(lsp-dependency
+ 'shader-sense
+ '(:system lsp-shader-sense--find-executable)
+ '(:download :url lsp-shader-sense--download-url
+             :store-path lsp-shader-sense--store-path
+             :decompress :zip
+             :binary-path lsp-shader-sense--binary-path
+             :set-executable? t))
 
 ;;; Major-mode activation
 
@@ -251,11 +332,14 @@ read in a workspace buffer so buffer-local values, for example ones from
    (make-lsp-client
     :new-connection (lsp-stdio-connection
                      (lambda ()
-                       (cons lsp-shader-sense-executable
+                       (cons (or (lsp-package-path 'shader-sense)
+                                 (lsp-shader-sense--find-executable))
                              lsp-shader-sense-args)))
     :activation-fn (lsp-activate-on lsp-shader-sense-language-id)
     :synchronize-sections (list lsp-shader-sense--section)
     :initialized-fn #'lsp-shader-sense--push-configuration
+    :download-server-fn (lambda (_client callback error-callback _update?)
+                           (lsp-package-ensure 'shader-sense callback error-callback))
     :server-id lsp-shader-sense--server-id)))
 
 (defun lsp-shader-sense--unregister ()
